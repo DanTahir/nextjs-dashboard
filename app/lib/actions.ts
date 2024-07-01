@@ -4,12 +4,24 @@ import { z } from 'zod';
 import { sql } from '@vercel/postgres';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
+import { signIn } from '@/auth';
+import { AuthError } from 'next-auth';
+import bcrypt from 'bcrypt';
 
 export type State = {
   errors?: {
     customerId?: string[];
     amount?: string[];
     status?: string[];
+  };
+  message?: string | null;
+};
+
+export type RegState = {
+  errors?: {
+    name?: string[];
+    email?: string[];
+    password?: string[];
   };
   message?: string | null;
 };
@@ -28,9 +40,28 @@ const FormSchema = z.object({
   }),
   date: z.string(),
 });
+
+const RegFormSchema = z.object({
+  id: z.string(),
+  name: z.string({
+    invalid_type_error: 'Please enter a username',
+  }),
+  email: z.string().email({
+    message: 'Please enter a valid email',
+  }),
+  password: z.string()
+    .min(8, { message: "Password must be at least 8 characters long" })
+    .refine(password => /[a-z]/.test(password), { message: "Password must contain at least one lowercase letter" })
+    .refine(password => /[A-Z]/.test(password), { message: "Password must contain at least one uppercase letter" })
+    .refine(password => /\d/.test(password), { message: "Password must contain at least one number" })
+    .refine(password => /[^a-zA-Z0-9]/.test(password), { message: "Password must contain at least one symbol" })
+
+});
  
 const CreateInvoice = FormSchema.omit({ id: true, date: true });
 const UpdateInvoice = FormSchema.omit({ id: true, date: true });
+
+const RegisterUser = RegFormSchema.omit({id: true});
 
 export async function createInvoice(prevState: State, formData: FormData) {
   const rawFormData = {
@@ -109,7 +140,7 @@ export async function updateInvoice(id: string, prevState: State, formData: Form
 }
 
 export async function deleteInvoice(id: string) {
-  throw new Error('Failed to Delete Invoice');
+  //throw new Error('Failed to Delete Invoice');
   try {
     await sql`DELETE FROM invoices WHERE id = ${id}`;
     revalidatePath('/dashboard/invoices');
@@ -118,4 +149,50 @@ export async function deleteInvoice(id: string) {
     return { message: 'Database Error: Failed to Delete Invoice.' };
   }
   revalidatePath('/dashboard/invoices');
+}
+
+export async function authenticate(prevState: string | undefined, formData: FormData){
+  try {
+    await signIn('credentials', formData);
+  } catch (error) {
+    if (error instanceof AuthError) {
+      switch (error.type) {
+        case 'CredentialsSignin':
+          return 'Invalid credentials.';
+        default:
+          return 'Something went wrong.';
+      }
+    }
+    throw error;
+  }
+}
+
+export async function registerUser(prevState: RegState, formData: FormData) {
+  const validatedFields = RegisterUser.safeParse({
+    name: formData.get('name'),
+    email: formData.get('email'),
+    password: formData.get('password'),
+  });
+
+  if (!validatedFields.success) {
+    return {
+      errors: validatedFields.error.flatten().fieldErrors,
+      message: 'Error in input. Failed to create user.',
+    };
+  }
+
+  const { name, email, password } = validatedFields.data;
+  const hashedPassword = await bcrypt.hash(password, 13);
+
+  try {
+    await sql`
+      INSERT INTO users (name, email, password)    
+      VALUES (${name}, ${email}, ${hashedPassword});
+  `;
+  } catch (error) {
+    return {
+      message: 'Database Error: Failed to Create User.',
+    };
+  }
+  redirect('/login');
 }
